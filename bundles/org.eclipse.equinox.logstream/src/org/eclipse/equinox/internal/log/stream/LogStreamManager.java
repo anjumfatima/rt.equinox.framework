@@ -1,37 +1,22 @@
 package org.eclipse.equinox.internal.log.stream;
 
-import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.osgi.framework.BundleActivator;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
+import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.log.LogEntry;
 import org.osgi.service.log.LogListener;
 import org.osgi.service.log.LogReaderService;
 import org.osgi.service.log.stream.LogStreamProvider;
-import org.osgi.util.pushstream.PushEvent;
-import org.osgi.util.pushstream.PushStream;
-import org.osgi.util.pushstream.PushStreamBuilder;
-import org.osgi.util.pushstream.PushStreamProvider;
 import org.osgi.util.tracker.ServiceTracker;
 import org.osgi.util.tracker.ServiceTrackerCustomizer;
 
-public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider, ServiceTrackerCustomizer<LogReaderService, AtomicReference<LogReaderService>>, LogListener {
-	private final PushStreamProvider pushStreamProvider = new PushStreamProvider();
-	private final Set<LogEntrySource> logEntrySources = new CopyOnWriteArraySet<>();
-	private final ExecutorService executor = Executors.newFixedThreadPool(1, new ThreadFactory() {
-		@Override
-		public Thread newThread(Runnable r) {
-			return new Thread(r, "LogStream thread");
-		}
-	});
+public class LogStreamManager implements BundleActivator, ServiceTrackerCustomizer<LogReaderService, AtomicReference<LogReaderService>>, LogListener {
+	private ServiceRegistration<LogStreamProvider> logStreamServiceRegistration;    
+	private LogStreamProviderFactory logStreamProviderFactory;
 	private ServiceTracker<LogReaderService, AtomicReference<LogReaderService>> logReaderService;
 	BundleContext context;
 	ReentrantLock eventProducerLock = new ReentrantLock();
@@ -41,9 +26,14 @@ public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider,
 	 * @see org.osgi.framework.BundleActivator#start(org.osgi.framework.BundleContext)
 	 */
 	public void start(BundleContext context) throws Exception {
+		
 		this.context = context;
 		logReaderService = new ServiceTracker<>(context, LogReaderService.class, this);
 		logReaderService.open();
+		
+		logStreamProviderFactory = new LogStreamProviderFactory(logReaderService);   
+		logStreamServiceRegistration = context.registerService(LogStreamProvider.class, logStreamProviderFactory, null); 
+		
 	}
 
 	/*
@@ -52,7 +42,8 @@ public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider,
 	 */
 	public void stop(BundleContext bundleContext) throws Exception {
 		logReaderService.close();
-		executor.shutdown();
+		logStreamServiceRegistration.unregister();   
+		logStreamServiceRegistration = null;		 
 	}
 
 	@Override
@@ -92,6 +83,7 @@ public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider,
 							}
 						}
 					}
+					
 					readerService.addLogListener(this);
 				}
 			}
@@ -102,6 +94,7 @@ public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider,
 
 	@Override
 	public void removedService(ServiceReference<LogReaderService> removedRef, AtomicReference<LogReaderService> removedTracked) {
+		
 		eventProducerLock.lock();
 		try {
 		} finally {
@@ -129,29 +122,12 @@ public class LogStreamFactoryImpl implements BundleActivator, LogStreamProvider,
 		}
 	}
 
-	@Override
-	public PushStream<LogEntry> createStream(Options... options) {
-		ServiceTracker<LogReaderService, AtomicReference<LogReaderService>> withHistory = null;
-		if (options != null) {
-			for (Options option : options) {
-				if (Options.HISTORY.equals(option)) {
-					withHistory = logReaderService;
-					break;
-				}
-			}
-		}
-		LogEntrySource logEntrySource = new LogEntrySource(executor, withHistory);
-		PushStreamBuilder<LogEntry, BlockingQueue<PushEvent<? extends LogEntry>>> streamBuilder = pushStreamProvider.buildStream(logEntrySource);
-		PushStream<LogEntry> logStream = streamBuilder.unbuffered().withExecutor(executor).create();
-		logEntrySources.add(logEntrySource);
-		return logStream;
-	}
+
 
 	@Override
 	public void logged(LogEntry entry) {
-		for (LogEntrySource logEntrySource : logEntrySources) {
-			logEntrySource.logged(entry);
-		}
+		
+		logStreamProviderFactory.postLogEntry(entry);
 	}
 
 }
